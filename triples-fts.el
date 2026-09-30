@@ -30,6 +30,31 @@
 (require 'sqlite)
 (require 'seq)
 
+(defgroup triples-fts nil
+  "Full text search for triples using SQLite FTS5."
+  :group 'triples)
+
+(defcustom triples-fts-tokenizer nil
+  "Tokenizer passed to the FTS5 virtual table, or nil for the
+SQLite default (unicode61).
+
+To enable Chinese full-text search, set this to \"simple\" and
+`triples-fts-extension-path' to the wangfenjin/simple shared
+library.  After changing the tokenizer you must rebuild the FTS
+index with `(triples-fts-setup DB t)'."
+  :type '(choice (const :tag "SQLite default (unicode61)" nil) string)
+  :group 'triples-fts)
+
+(defcustom triples-fts-extension-path nil
+  "Shared library to load before creating the FTS table.
+
+Passed to `sqlite-load-extension'.  Needed when the tokenizer
+ships as a loadable SQLite extension (e.g. wangfenjin/simple).
+Loading is idempotent: reloading an already-loaded extension
+returns nil without error."
+  :type '(choice (const :tag "None" nil) string)
+  :group 'triples-fts)
+
 (defun triples-fts-setup (db &optional force)
   "Ensure DB has a FTS table.
 As long as the FTS table exists, this will not try to recreate
@@ -37,12 +62,17 @@ it.  If FORCE is non-nil, then the FTS and all triggers will be
 recreated and repopulated."
   (unless (eq triples-sqlite-interface 'builtin)
     (error "Emacs 29.1 or later is required for triples-fts"))
+  (when triples-fts-extension-path
+    (sqlite-load-extension db triples-fts-extension-path))
   (let ((fts-existed (sqlite-select db "SELECT name FROM sqlite_master WHERE type='table' AND name='triples_fts'"))
         ;; Detect the old buggy delete trigger (missing rowid column).
         (had-buggy-triggers
          (sqlite-select db "SELECT 1 FROM sqlite_master WHERE name='triples_fts_delete' AND sql NOT LIKE '%rowid%'")))
     (when (and force fts-existed) (sqlite-execute db "DROP TABLE triples_fts"))
-    (sqlite-execute db "CREATE VIRTUAL TABLE IF NOT EXISTS triples_fts USING fts5 (subject, predicate, object, content=triples, content_rowid=rowid)")
+    (sqlite-execute db (format "CREATE VIRTUAL TABLE IF NOT EXISTS triples_fts USING fts5 (subject, predicate, object, content=triples, content_rowid=rowid%s)"
+                               (if triples-fts-tokenizer
+                                   (format ", tokenize = '%s'" triples-fts-tokenizer)
+                                 "")))
     ;; Triggers that will update triples_fts, but only for text objects.
     ;;
     ;; Always drop and recreate rather than using IF NOT EXISTS,
