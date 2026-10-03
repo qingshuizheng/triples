@@ -35,7 +35,7 @@
 As long as the FTS table exists, this will not try to recreate
 it.  If FORCE is non-nil, then the FTS and all triggers will be
 recreated and repopulated."
-  (unless (eq triples-sqlite-interface 'builtin)
+  (unless (eq triples-database-interface 'builtin)
     (error "Emacs 29.1 or later is required for triples-fts"))
   (let ((fts-existed (sqlite-select db "SELECT name FROM sqlite_master WHERE type='table' AND name='triples_fts'"))
         ;; Detect the old buggy delete trigger (missing rowid column).

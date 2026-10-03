@@ -5,7 +5,7 @@
 ;; Author: Andrew Hyatt <ahyatt@gmail.com>
 ;; Homepage: https://github.com/ahyatt/triples
 ;; Package-Requires: ((seq "2.0") (emacs "28.1"))
-;; Keywords: triples, kg, data, sqlite
+;; Keywords: triples, kg, data, sqlite, postgres
 ;; Version: 0.6.2
 ;; This program is free software; you can redistribute it and/or
 ;; modify it under the terms of the GNU General Public License as
@@ -27,7 +27,7 @@
 ;; provide an API offering two-way links between all information stored.
 ;;
 ;; This package requires either Emacs 29 or the emacsql package to be installed.
-
+;; The PostgreSQL backend additionally requires the `pg' (pg.el) package.
 
 (require 'cl-lib)
 (require 'package)
@@ -43,16 +43,27 @@
 (declare-function emacsql-sqlite "emacsql")
 (declare-function emacsql "emacsql")
 (declare-function emacsql-sqlite-open "emacsql")
+(declare-function emacsql-pg "emacsql-pg" (dbname user &rest _))
 
-(defvar triples-sqlite-interface
+(defvaralias 'triples-sqlite-interface 'triples-database-interface
+  "Compatibility alias for `triples-database-interface'.")
+
+(defvar triples-database-interface
   (if (and (fboundp 'sqlite-available-p) (sqlite-available-p))
       'builtin
     'emacsql)
-  "The interface to sqlite to use.
-Either `builtin' or `emacsql'.  Defaults to builtin when
-available.  Builtin is available when the version is Emacs 29 or
-greater, and emacsql is usable when the `emacsql' package is
-installed.")
+  "The interface to the database to use.
+Either `builtin', `emacsql', or `pg'.
+
+`builtin' uses the sqlite support built into Emacs 29.1 or later.
+`emacsql' uses the emacsql package with a SQLite backend.
+`pg' uses the emacsql package with a PostgreSQL backend (via
+`emacsql-pg'), connecting to the database specified by
+`triples-pg-connection-spec'.
+
+Defaults to builtin when available.  Builtin is available when the
+version is Emacs 29 or greater, and emacsql is usable when the
+`emacsql' package is installed.")
 
 (defconst triples-sqlite-executable "sqlite3"
   "If using Emacs 29 builtin sqlite, this specifices the executable.
@@ -103,14 +114,19 @@ This is used in upgrades and when problems are detected."
 
 (defun triples-connect (&optional file)
   "Connect to the database FILE and make sure it is populated.
-If FILE is nil, use `triples-default-database-filename'."
-  (unless (pcase-exhaustive triples-sqlite-interface
+If FILE is nil, use `triples-default-database-filename'.
+
+If `triples-database-interface' is `pg', FILE is ignored and the
+connection is made according to `triples-pg-connection-spec'."
+  (unless (pcase-exhaustive triples-database-interface
             ('builtin
              (and (fboundp 'sqlite-available-p) (sqlite-available-p)))
-            ('emacsql (require 'emacsql nil t)))
-    (error "The triples package requires either Emacs 29 or the emacsql package to be installed"))
+            ('emacsql (require 'emacsql nil t))
+            ('pg (and (require 'emacsql nil t)
+                      (require 'emacsql-pg nil t))))
+    (error "The triples package requires either Emacs 29, the emacsql package, or, for the pg interface, the emacsql and pg packages to be installed"))
   (let ((file (or file triples-default-database-filename)))
-    (pcase triples-sqlite-interface
+    (pcase triples-database-interface
       ('builtin (let* ((db (sqlite-open file)))
                   (unless (sqlitep db)
                     (error "Could not open sqlite database at %s" file))
@@ -139,7 +155,57 @@ If FILE is nil, use `triples-default-database-filename'."
            (emacsql db [:create-index subject_predicate_idx :on triples [subject predicate]])
            (emacsql db [:create-index predicate_object_idx :on triples [predicate object]])
            (emacsql db [:create-unique-index subject_predicate_object_properties_idx :on triples [subject predicate object properties]]))
-         db)))))
+         db))
+      ('pg (triples-pg-connect)))))
+
+(defvar triples-pg-connection-spec
+  (list :database "triples"
+        :user (user-login-name)
+        :host "localhost"
+        :port 5432)
+  "Connection spec (a plist) used when `triples-database-interface' is `pg'.
+
+Keys:
+- :database -- PostgreSQL database name (string).
+- :user     -- PostgreSQL user name (string).
+- :host     -- Server host (string, default \"localhost\").
+- :port     -- Server port (integer, default 5432).
+- :password -- Password (string) or nil, e.g. for peer/trust auth.")
+
+(defun triples-pg-connect (&optional spec)
+  "Connect to a PostgreSQL database and make sure it is populated.
+SPEC is a plist as in `triples-pg-connection-spec', or nil to use
+that variable.  Returns the connection object, which can be used
+with the rest of the triples API when `triples-database-interface'
+is `pg'."
+  (require 'emacsql-pg)
+  (let* ((spec (or spec triples-pg-connection-spec))
+         (db (emacsql-pg (plist-get spec :database)
+                         (plist-get spec :user)
+                         :host (or (plist-get spec :host) "localhost")
+                         :password (plist-get spec :password)
+                         :port (or (plist-get spec :port) 5432)))
+         (triple-table-exists
+          (emacsql db "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'triples'")))
+    (unless triple-table-exists
+      (triples-setup-table-for-pg db))
+    db))
+
+(defun triples-setup-table-for-pg (db)
+  "Set up the triples table in PostgreSQL DB.
+PostgreSQL needs its own existence check and has no sqlite-specific
+constructs, so this is separate from the builtin setup.  Note that
+PostgreSQL does not accept a bare `text' token as a column
+constraint the way SQLite does, so the predicate and properties
+columns rely on the backend's default TEXT type."
+  (emacsql db [:create-table triples ([(subject :not-null)
+                                       (predicate :not-null)
+                                       (object :not-null)
+                                       (properties :not-null)])])
+  (emacsql db [:create-index subject_idx :on triples [subject]])
+  (emacsql db [:create-index subject_predicate_idx :on triples [subject predicate]])
+  (emacsql db [:create-index predicate_object_idx :on triples [predicate object]])
+  (emacsql db [:create-unique-index subject_predicate_object_properties_idx :on triples [subject predicate object properties]]))
 
 (defun triples-setup-table-for-builtin (db)
   "Set up the triples table in DB.
@@ -152,10 +218,10 @@ upgrades to version 0.3"
   (sqlite-execute db "CREATE UNIQUE INDEX IF NOT EXISTS subject_predicate_object_properties_idx ON triples (subject, predicate, object, properties)"))
 
 (defun triples-close (db)
-  "Close sqlite database DB."
-  (pcase triples-sqlite-interface
+  "Close database DB."
+  (pcase triples-database-interface
     ('builtin (sqlite-close db))
-    ('emacsql (emacsql-close db))))
+    ((or 'emacsql 'pg) (emacsql-close db))))
 
 (defun triples-backup (_ filename num-to-keep)
   "Perform a backup of the db, located at path FILENAME.
@@ -177,18 +243,47 @@ This also will clear excess backup files, according to
 NUM-TO-KEEP, which specifies how many backup files at max should
 exist at any time.  Older backups are the ones that are deleted."
   (let ((filename (expand-file-name (or filename triples-default-database-filename))))
-    (call-process (pcase triples-sqlite-interface
-                    ('builtin triples-sqlite-executable)
-                    ('emacsql emacsql-sqlite-executable))
-                  nil nil nil filename
-                  (format ".backup '%s'" (expand-file-name
-                                          (car (find-backup-file-name
-                                                filename)))))
+    (pcase triples-database-interface
+      ('builtin (call-process triples-sqlite-executable nil nil nil filename
+                              (format ".backup '%s'" (expand-file-name
+                                                      (car (find-backup-file-name
+                                                            filename))))))
+      ('emacsql (call-process emacsql-sqlite-executable nil nil nil filename
+                              (format ".backup '%s'" (expand-file-name
+                                                      (car (find-backup-file-name
+                                                            filename))))))
+      ('pg (triples--pg-backup filename)))
     (let ((backup-files (file-backup-file-names filename)))
       (cl-loop for backup-file in (cl-subseq
                                    backup-files
                                    (min num-to-keep (length backup-files)))
                do (delete-file backup-file)))))
+
+(defun triples--pg-backup (filename)
+  "Dump the PostgreSQL database to the backup file for FILENAME.
+Uses pg_dump with the connection spec in
+`triples-pg-connection-spec'.  The dump is written as a plain SQL
+script to the same backup location that `triples-backup' uses for
+the other interfaces."
+  (let* ((spec triples-pg-connection-spec)
+         (backup-file (expand-file-name (car (find-backup-file-name filename))))
+         (process-environment
+          (append (when (plist-get spec :password)
+                    (list (format "PGPASSWORD=%s" (plist-get spec :password))))
+                  process-environment))
+         (status
+          (apply #'call-process "pg_dump" nil nil nil
+                 (append (list (format "--dbname=%s" (plist-get spec :database))
+                               (format "--username=%s" (plist-get spec :user))
+                               "--no-owner"
+                               "--no-privileges"
+                               (format "--file=%s" backup-file))
+                         (when (plist-get spec :host)
+                           (list (format "--host=%s" (plist-get spec :host))))
+                         (when (plist-get spec :port)
+                           (list (format "--port=%s" (plist-get spec :port))))))))
+    (unless (zerop status)
+      (error "pg_dump failed with exit status %s" status))))
 
 (defun triples--decolon (sym)
   "Remove colon from SYM."
@@ -235,7 +330,7 @@ normal schema checks, so should not be called from client programs."
     (error "Predicates in triples must always be symbols"))
   (when (and (fboundp 'plistp) (not (plistp properties)))
     (error "Properties stored must always be plists"))
-  (pcase triples-sqlite-interface
+  (pcase triples-database-interface
     ('builtin
      (sqlite-execute db "REPLACE INTO triples VALUES (?, ?, ?, ?)"
                      (list (triples-standardize-val subject)
@@ -250,6 +345,13 @@ normal schema checks, so should not be called from client programs."
      ;; as a string, or else it will store as something that would come out as a
      ;; string.  And if we use nil, it will actually store a NULL in the cell.
      (emacsql db [:replace :into triples :values $v1]
+              (vector subject (triples--decolon predicate) object (or properties '(:t t)))))
+    ('pg
+     ;; PostgreSQL has no REPLACE INTO.  The unique index on
+     ;; (subject, predicate, object, properties) makes ON CONFLICT DO NOTHING
+     ;; equivalent: a conflicting row would be identical, so skipping it is the
+     ;; same as replacing it.
+     (emacsql db [:insert :into triples :values $v1 :on-conflict-do-nothing]
               (vector subject (triples--decolon predicate) object (or properties '(:t t)))))))
 
 (defun triples--emacsql-andify (wc)
@@ -266,6 +368,24 @@ elements, but it shouldn't matter."
             (setq clauses (cdr clauses)))
           result)))
 
+(defun triples--emacsql-delete (db &optional subject predicate object properties)
+  "Delete triples matching SUBJECT, PREDICATE, OBJECT, PROPERTIES from DB.
+Shared by the `emacsql' and `pg' interfaces."
+  (let ((n 0))
+    (apply #'emacsql
+           db
+           (apply #'vector
+                  (append '(:delete :from triples)
+                          (when (or subject predicate object properties)
+                            (triples--emacsql-andify
+                             (append
+                              '(:where)
+                              (when subject `((= subject ,(intern (format "$s%d" (cl-incf n))))))
+                              (when predicate `((= predicate ,(intern (format "$s%d" (cl-incf n))))))
+                              (when object `((= object ,(intern (format "$s%d" (cl-incf n))))))
+                              (when properties `((= properties ,(intern (format "$s%d" (cl-incf n)))))))))))
+           (seq-filter #'identity (list subject predicate object properties)))))
+
 (defun triples-db-delete (db &optional subject predicate object properties)
   "Delete triples matching SUBJECT, PREDICATE, OBJECT, PROPERTIES.
 
@@ -273,7 +393,7 @@ DB is the database to delete from.
 
 If any of these are nil, they will not selected for.  If you set
 all to nil, everything will be deleted, so be careful!"
-  (pcase triples-sqlite-interface
+  (pcase triples-database-interface
     ('builtin (sqlite-execute
                db
                (concat "DELETE FROM triples"
@@ -287,21 +407,8 @@ all to nil, everything will be deleted, so be careful!"
                                                     (when properties "PROPERTIES = ?")))
                                   " AND "))))
                (mapcar #'triples-standardize-val (seq-filter #'identity (list subject predicate object properties)))))
-    ('emacsql
-     (let ((n 0))
-       (apply #'emacsql
-              db
-              (apply #'vector
-                     (append '(:delete :from triples)
-                             (when (or subject predicate object properties)
-                               (triples--emacsql-andify
-                                (append
-                                 '(:where)
-                                 (when subject `((= subject ,(intern (format "$s%d" (cl-incf n))))))
-                                 (when predicate `((= predicate ,(intern (format "$s%d" (cl-incf n))))))
-                                 (when object `((= object ,(intern (format "$s%d" (cl-incf n))))))
-                                 (when properties `((= properties ,(intern (format "$s%d" (cl-incf n)))))))))))
-              (seq-filter #'identity (list subject predicate object properties)))))))
+    ((or 'emacsql 'pg)
+     (triples--emacsql-delete db subject predicate object properties))))
 
 (defun triples-db-delete-subject-predicate-prefix (db subject pred-prefix)
   "Delete triples matching SUBJECT and predicates with PRED-PREFIX.
@@ -309,12 +416,13 @@ all to nil, everything will be deleted, so be careful!"
 DB is the database to delete from."
   (unless (symbolp pred-prefix)
     (error "Predicates in triples must always be symbols"))
-  (pcase triples-sqlite-interface
+  (pcase triples-database-interface
     ('builtin (sqlite-execute db "DELETE FROM triples WHERE subject = ? AND predicate LIKE ?"
                               (list (triples-standardize-val subject)
                                     (format "%s/%%" (triples--decolon pred-prefix)))))
-    ('emacsql (emacsql db [:delete :from triples :where (= subject $s1) :and (like predicate $r2)]
-                       subject (format "%s/%%" (triples--decolon pred-prefix))))))
+    ((or 'emacsql 'pg)
+     (emacsql db [:delete :from triples :where (= subject $s1) :and (like predicate $r2)]
+              subject (format "%s/%%" (triples--decolon pred-prefix))))))
 
 (defun triples-db-select-pred-op (db pred op val &optional properties limit)
   "Select matching predicates with PRED having OP relation to VAL.
@@ -331,7 +439,7 @@ If LIMIT is a positive integer, limit the results to that number."
   (unless (symbolp pred)
     (error "Predicates in triples must always be symbols"))
   (let ((pred (triples--decolon pred)))
-    (pcase triples-sqlite-interface
+    (pcase triples-database-interface
       ('builtin
        (mapcar (lambda (row) (mapcar #'triples-standardize-result row))
                (sqlite-select
@@ -364,17 +472,88 @@ If LIMIT is a positive integer, limit the results to that number."
                    (list :and '(= properties $s3)))
                  (when (and limit (> limit 0))
                    (list :limit limit)))
-                pred val properties)))))
+                pred val properties))
+      ('pg (triples--pg-select-pred-op db pred op val properties limit)))))
+
+(defun triples--pg-select-pred-op (db pred op val &optional properties limit)
+  "SELECT rows from PostgreSQL DB with PRED comparing OP VAL.
+PRED is a decoloned predicate symbol.
+
+PostgreSQL has no COLLATE NOCASE, so string comparisons wrap both
+sides in LOWER(), giving the same case-insensitive behavior as the
+sqlite interfaces.  Integer and float objects are stored as text
+in PostgreSQL (everything is TEXT), so numeric comparisons cast
+the column, guarded by a numeric-looking regex to avoid hard
+errors on non-numeric objects."
+  (let* ((args (append (list pred val)
+                       (when properties (list properties))
+                       (when (and limit (> limit 0)) (list limit))))
+         ;; Parameters are $s1, $s2, then one placeholder per optional
+         ;; argument, so the limit placeholder number depends on whether
+         ;; properties is present.
+         (limit-ph (if properties "$s4" "$s3"))
+         (comparison
+          (pcase val
+            ((pred integerp)
+             (format "%s %s %s"
+                     (if (eq op 'like) "CAST(object AS TEXT)" "CAST(object AS BIGINT)")
+                     (symbol-name op)
+                     (if (eq op 'like) "CAST($s2 AS TEXT)" "$s2")))
+            ((pred floatp)
+             (format "%s %s %s"
+                     (if (eq op 'like) "CAST(object AS TEXT)" "CAST(object AS DOUBLE PRECISION)")
+                     (symbol-name op)
+                     (if (eq op 'like) "CAST($s2 AS TEXT)" "$s2")))
+            (_
+             (format "LOWER(object) %s LOWER($s2)"
+                     (if (eq op 'like) "LIKE" (symbol-name op))))))
+         (numeric-guard
+          (pcase val
+            ((pred integerp)
+             (unless (eq op 'like) " AND object ~ '^[+-]?[0-9]+$'"))
+            ((pred floatp)
+             (unless (eq op 'like) " AND object ~ '^[+-]?[0-9]+\\.[0-9]+$'"))
+            (_ "")))
+         (sql (concat "SELECT * FROM triples WHERE predicate = $s1 AND "
+                      comparison
+                      numeric-guard
+                      (when properties " AND properties = $s3")
+                      (when (and limit (> limit 0))
+                        (format " LIMIT %s" limit-ph)))))
+    (apply #'emacsql db sql args)))
 
 (defun triples-db-select-pred-prefix (db subject pred-prefix)
   "Return rows in DB matching SUBJECT and PRED-PREFIX."
-  (pcase triples-sqlite-interface
+  (pcase triples-database-interface
     ('builtin (mapcar (lambda (row) (mapcar #'triples-standardize-result row))
                       (sqlite-select db "SELECT * FROM triples WHERE subject = ? AND predicate LIKE ?"
                                      (list (triples-standardize-val subject)
                                            (format "%s/%%" pred-prefix)))))
-    ('emacsql (emacsql db [:select * :from triples :where (= subject $s1) :and (like predicate $r2)]
-                       subject (format "%s/%%" pred-prefix)))))
+    ((or 'emacsql 'pg)
+     (emacsql db [:select * :from triples :where (= subject $s1) :and (like predicate $r2)]
+              subject (format "%s/%%" pred-prefix)))))
+
+(defun triples--emacsql-select (db &optional subject predicate object properties selector)
+  "Return rows in DB matching SUBJECT, PREDICATE, OBJECT, PROPERTIES.
+Shared by the `emacsql' and `pg' interfaces.  SELECTOR is a list
+of symbols (subject, predicate, object, properties) to retrieve,
+or nil for all columns."
+  (let ((n 0))
+    (apply #'emacsql
+           db
+           (apply #'vector
+                  (append `(:select
+                            ,(if selector (apply #'vector selector) '*)
+                            :from triples)
+                          (when (or subject predicate object properties)
+                            (triples--emacsql-andify
+                             (append
+                              '(:where)
+                              (when subject `((= subject ,(intern (format "$s%d" (cl-incf n))))))
+                              (when predicate `((= predicate ,(intern (format "$s%d" (cl-incf n))))))
+                              (when object `((= object ,(intern (format "$s%d" (cl-incf n))))))
+                              (when properties `((= properties ,(intern (format "$s%d" (cl-incf n)))))))))))
+           (seq-filter #'identity (list subject predicate object properties)))))
 
 (defun triples-db-select (db &optional subject predicate object properties selector)
   "Return rows matching SUBJECT, PREDICATE, OBJECT, PROPERTIES.
@@ -384,7 +563,7 @@ DB is the database to select from.
 If any of these are nil, they are not included in the select
 statement.  The SELECTOR is list of symbols subject, precicate,
 object, properties to retrieve or nil for *."
-  (pcase triples-sqlite-interface
+  (pcase triples-database-interface
     ('builtin (mapcar (lambda (row) (mapcar #'triples-standardize-result row))
                       (sqlite-select db
                                      (concat "SELECT "
@@ -401,29 +580,14 @@ object, properties to retrieve or nil for *."
                                                                           (when properties "PROPERTIES = ?")))
                                                         " AND "))))
                                      (mapcar #'triples-standardize-val (seq-filter #'identity (list subject predicate object properties))))))
-    ('emacsql
-     (let ((n 0))
-       (apply #'emacsql
-              db
-              (apply #'vector
-                     (append `(:select
-                               ,(if selector (apply #'vector selector) '*)
-                               :from triples)
-                             (when (or subject predicate object properties)
-                               (triples--emacsql-andify
-                                (append
-                                 '(:where)
-                                 (when subject `((= subject ,(intern (format "$s%d" (cl-incf n))))))
-                                 (when predicate `((= predicate ,(intern (format "$s%d" (cl-incf n))))))
-                                 (when object `((= object ,(intern (format "$s%d" (cl-incf n))))))
-                                 (when properties `((= properties ,(intern (format "$s%d" (cl-incf n)))))))))))
-              (seq-filter #'identity (list subject predicate object properties)))))))
+    ((or 'emacsql 'pg)
+     (triples--emacsql-select db subject predicate object properties selector))))
 
 (defun triples-db-count (db)
   "Return the number of triples in DB."
-  (pcase triples-sqlite-interface
+  (pcase triples-database-interface
     ('builtin (caar (sqlite-select db "SELECT COUNT(*) FROM triples")))
-    ('emacsql (caar (emacsql db [:select (funcall count *) :from triples])))))
+    ((or 'emacsql 'pg) (caar (emacsql db [:select (funcall count *) :from triples])))))
 
 (defun triples-move-subject (db old-subject new-subject)
   "Replace all instance in DB of OLD-SUBJECT to NEW-SUBJECT.
@@ -432,7 +596,7 @@ This will throw an error if there is an existing subject
 NEW-SUBJECT with at least one equal property (such as type
 markers).  But if there are no commonalities, the OLD-SUBJECT is
 merged into NEW-SUBJECT."
-  (pcase triples-sqlite-interface
+  (pcase triples-database-interface
     ('builtin
      (condition-case err
          (progn
@@ -444,7 +608,7 @@ merged into NEW-SUBJECT."
            (sqlite-commit db))
        (error (sqlite-rollback db)
               (signal 'error err))))
-    ('emacsql
+    ((or 'emacsql 'pg)
      (emacsql-with-transaction db
        (emacsql db [:update triples :set (= subject $s1) :where (= subject $s2)]
                 new-subject old-subject)
@@ -610,7 +774,7 @@ FORM is the code to delay."
 
 (defun triples--with-transaction (db body-fun)
   "Wrap BODY-FUN in a transaction for DB."
-  (pcase triples-sqlite-interface
+  (pcase triples-database-interface
     ('builtin  (condition-case err
                    (progn
                      (sqlite-transaction db)
@@ -618,10 +782,11 @@ FORM is the code to delay."
                      (sqlite-commit db))
                  (error (sqlite-rollback db)
                         (signal (car err) (cdr err)))))
-    ('emacsql (funcall (triples--eval-when-fboundp emacsql-with-transaction
-                         (lambda (db body-fun)
-                           (emacsql-with-transaction db (funcall body-fun))))
-                       db body-fun))))
+    ((or 'emacsql 'pg)
+     (funcall (triples--eval-when-fboundp emacsql-with-transaction
+               (lambda (db body-fun)
+                 (emacsql-with-transaction db (funcall body-fun))))
+              db body-fun))))
 
 (defun triples-set-types (db subject &rest combined-props)
   "Set all data for types in COMBINED-PROPS in DB for SUBJECT.
