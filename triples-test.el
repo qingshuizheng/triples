@@ -48,7 +48,7 @@
                    '(("sub" pred "obj"))))
     ;; Test that we actually are storing with builtin something compatible
     ;; with emacsql.
-    (when (eq triples-sqlite-interface 'builtin)
+    (when (eq triples-database-interface 'builtin)
       (should (equal (sqlite-select db "SELECT * FROM triples")
                      '(("\"sub\"" "pred" "\"obj\"" "()")))))
     ;; Test that it replaces - this shouldn't result in two rows.
@@ -113,10 +113,10 @@
     (triples-db-insert db 'sub1 'pred/bar 'obj)
     (triples-db-insert db 'sub2 'pred/foo 'obj)
     (should (equal (triples-test-list-sort (triples-db-select-pred-prefix db 'sub1 'pred))
-                   (triples-test-list-sort `((sub1 pred/foo obj ,(pcase triples-sqlite-interface
+                   (triples-test-list-sort `((sub1 pred/foo obj ,(pcase triples-database-interface
                                                                    ('builtin nil)
                                                                    ('emacsql '(:t t))))
-                                             (sub1 pred/bar obj ,(pcase triples-sqlite-interface
+                                             (sub1 pred/bar obj ,(pcase triples-database-interface
                                                                    ('builtin nil)
                                                                    ('emacsql '(:t t))))))))))
 
@@ -180,7 +180,7 @@
 
 (ert-deftest triples-test-builtin-emacsql-compat ()
   (cl-loop for subject in '(1 a "a") do
-           (let ((triples-sqlite-interface 'builtin))
+           (let ((triples-database-interface 'builtin))
              (triples-test-with-temp-db
                (triples-add-schema db 'person
                                    '(name :base/unique t :base/type string)
@@ -190,7 +190,7 @@
                (should (equal (triples-test-plist-sort (triples-get-type db subject 'person))
                               (triples-test-plist-sort '(:age 41 :name "Alice Aardvark" :temperature 36.6))))
                (triples-close db)
-               (let* ((triples-sqlite-interface 'emacsql)
+               (let* ((triples-database-interface 'emacsql)
                       (db (triples-connect db-file)))
                  (should (equal (triples-test-plist-sort (triples-get-type db subject 'person))
                                 (triples-test-plist-sort '(:age 41 :name "Alice Aardvark" :temperature 36.6))))
@@ -200,7 +200,7 @@
 
 (ert-deftest triples-test-emacsql-builtin-compat ()
   (cl-loop for subject in '(1 a "a") do
-           (let ((triples-sqlite-interface 'emacsql))
+           (let ((triples-database-interface 'emacsql))
              (triples-test-with-temp-db
                (triples-add-schema db 'person
                                    '(name :base/unique t :base/type string)
@@ -210,7 +210,7 @@
                (should (equal (triples-test-plist-sort (triples-get-type db subject 'person))
                               (triples-test-plist-sort '(:age 41 :name "Alice Aardvark" :temperature 36.6))))
                (triples-close db)
-               (let* ((triples-sqlite-interface 'builtin)
+               (let* ((triples-database-interface 'builtin)
                       (db (triples-connect db-file)))
                  (should (equal (triples-test-plist-sort (triples-get-type db subject 'person))
                                 (triples-test-plist-sort '(:age 41 :name "Alice Aardvark" :temperature 36.6))))
@@ -219,7 +219,7 @@
                (setq db (triples-connect db-file))))))
 
 (ert-deftest triples-test-emacsql-to-sqlite-dup-fixing ()
-  (let ((triples-sqlite-interface 'emacsql)
+  (let ((triples-database-interface 'emacsql)
         (db-file (make-temp-file "triples-test"))
         (db))
     (setq triples-test-db-file db-file)
@@ -227,7 +227,7 @@
     (triples-add-schema db 'person '(name :base/unique t :base/type string))
     (triples-set-type db 1 'person :name "Alice Aardvark")
     (triples-close db)
-    (setq triples-sqlite-interface 'builtin)
+    (setq triples-database-interface 'builtin)
     (setq db (triples-connect db-file))
     (triples-set-type db 1 'person :name "Alice Aardvark")
     ;; Should just be one plist key and value, so two values. However, if we
@@ -565,6 +565,26 @@
                                                            :employee/manager "bob"
                                                            :employee/reportees ("catherine" "dennis")))))))
 
+
+(ert-deftest triples-test-database-interface-alias ()
+  "The old `triples-sqlite-interface' name must keep working."
+  (should (eq (indirect-variable 'triples-sqlite-interface)
+              'triples-database-interface))
+  (with-no-warnings
+    (let ((triples-sqlite-interface 'emacsql))
+      (should (eq triples-database-interface 'emacsql)))
+    (let ((before triples-database-interface))
+      (unwind-protect
+          (progn
+            (setq triples-sqlite-interface 'builtin)
+            (should (eq triples-database-interface 'builtin)))
+        (setq triples-database-interface before)))))
+
+(ert-deftest triples-test-select-pred-op-rejects-unknown-operator ()
+  ;; The operator is validated before DB is touched, so no connection
+  ;; is needed here.
+  (should-error (triples-db-select-pred-op nil 'pred/foo 'foo "obj") :type 'error)
+  (should-error (triples-db-select-pred-op nil 'pred/foo "=" "obj") :type 'error))
 
 (provide 'triples-test)
 

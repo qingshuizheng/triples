@@ -1,5 +1,19 @@
 TITLE: Changelog for the triples module for GNU Emacs.
 
+* 0.7.0
+- Add a PostgreSQL backend, selected by setting
+  =triples-database-interface= to =pg= and configuring
+  =triples-pg-connection-spec=.  It needs the =emacsql= and =pg=
+  packages, and it does not support full text search.
+- Rename =triples-sqlite-interface= to =triples-database-interface=,
+  since the variable now also selects PostgreSQL.  The old name is
+  kept as an obsolete alias.
+- =triples-db-select-pred-op= now signals an error for comparison
+  operators other than =<' =<== '== '!=' '>=' '>= and 'like=, rather
+  than passing them into the SQL text.
+- =triples-backup= uses =pg_dump= for a =pg= database, writing the
+  dump to a temporary file first so that a failed dump cannot be
+  mistaken for a usable backup.
 * 0.6.2
 - Fix FTS bug on deleted data that can corrupt the FTS index.
 - Better errors on db open failures.
