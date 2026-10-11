@@ -55,6 +55,38 @@ returns nil without error."
   :type '(choice (const :tag "None" nil) string)
   :group 'triples-fts)
 
+(defcustom triples-fts-term-expander nil
+  "Function used to rewrite single query terms before FTS5 sees them.
+
+When nil, every term is handed to FTS5 as a bound parameter and is
+interpreted with FTS5's own query syntax.
+
+When set to a function, it is called with one argument, a term from
+the user's query, and should return either
+
+  nil     to leave TERM alone, so it is passed as a bound
+          parameter, or
+  STRING  to use STRING as the SQL expression matching TERM,
+          with TERM still bound to the \"?\" inside it.
+
+This exists because a tokenizer extension may expect a query
+syntax that plain FTS5 parsing cannot produce.  With the
+wangfenjin/simple extension, returning \"simple_query(?)\" makes
+pinyin work: \"zhongwen\" then matches notes containing 中文.
+
+Prefer `simple_query' over `jieba_query' there.  Both expand
+pinyin identically, but `jieba_query' needs the external cppjieba
+dictionary loaded with `jieba_dict', and calls abort() -- killing
+the whole Emacs process -- when that dictionary is missing.
+`simple_query' only needs the pinyin data compiled into the
+extension.
+
+Terms that `triples-fts--transform-query' rewrites into
+`predicate:\"...\" object:\"...\"' pairs are never passed to the
+expander, because rewriting them would destroy that syntax."
+  :type '(choice (const :tag "None" nil) function)
+  :group 'triples-fts)
+
 (defun triples-fts-setup (db &optional force)
   "Ensure DB has a FTS table.
 As long as the FTS table exists, this will not try to recreate
@@ -135,6 +167,11 @@ This returns a list of new queries.  Because each triple is a row, we
 have each part of the query matching separately, and then we do an
 intersection on the results.
 
+Each element is a cons of the query text and a flag saying whether
+`triples-fts-term-expander' is allowed to rewrite it.  Terms turned
+into predicate/object pairs must not be rewritten, because the
+expansion would destroy that syntax.
+
 Because predicates that we need to match against are
 
 E.g. if `tag' is an abbreviation for `tagged/tag', from the alist
@@ -150,10 +187,19 @@ object:\"foo\" urgent\"."
                   (full   (assoc-default prefix abbrevs)))
              (if (or full (string-match-p "/" prefix))
                  ;; Example: "tag" => "tagged/tag", rest => "foo"
-                 (format "predicate:\"%s\" object:\"%s\"" (or full prefix) rest)
-               w))  ; No known abbreviation; just leave as-is.
-         w))
+                 (cons (format "predicate:\"%s\" object:\"%s\"" (or full prefix) rest) nil)
+               (cons w t)))  ; No known abbreviation; just leave as-is.
+         (cons w t)))
      segments)))
+
+(defun triples-fts--term-sql (term)
+  "Return the SQL expression matching TERM inside a MATCH clause.
+
+This is the bound parameter \"?\" unless `triples-fts-term-expander'
+rewrites TERM into something else."
+  (or (and triples-fts-term-expander
+           (funcall triples-fts-term-expander term))
+      "?"))
 
 (defun triples-fts-query-subject (db query &optional abbrevs)
   "Query DB with QUERY, returning only subjects.
@@ -165,6 +211,9 @@ Predicates can appear before colons to restrict a query term.  For
 example, `person/name:Billy'.  Anything with a slash in it, or matching
 an entry in ABBREV will be used to filter by a predicate, otherwise it
 is passed to FTS5 as-is.
+
+Terms that are not restricted to a predicate are additionally passed
+through `triples-fts-term-expander', if it is set.
 
 ABBREVS is an alist of abbreviations to predicate (both strings).  If
 this is populated then we also expand user abbreviations like `tag:xyz`
@@ -178,10 +227,13 @@ this is populated then we also expand user abbreviations like `tag:xyz`
                   (mapcar #'car
                           (sqlite-select
                            db
-                           "SELECT subject FROM triples_fts
-         WHERE triples_fts MATCH ?
+                           (format "SELECT subject FROM triples_fts
+         WHERE triples_fts MATCH %s
          ORDER BY rank"
-                           (list subquery))))
+                                   (if (cdr subquery)
+                                       (triples-fts--term-sql (car subquery))
+                                     "?"))
+                           (list (car subquery)))))
                 (triples-fts--transform-query query abbrevs))))))
 
 (provide 'triples-fts)

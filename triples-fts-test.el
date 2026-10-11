@@ -73,6 +73,31 @@
       (should (equal nil (triples-fts-query-subject db "tag:baz world" abbrevs)))
       (should (equal '(a) (triples-fts-query-subject db "text/tag:foo world" abbrevs))))))
 
+(ert-deftest triples-fts-query-subject-with-term-expander ()
+  "`triples-fts-term-expander' rewrites bare terms only."
+  (triples-test-with-temp-db
+    (let* ((abbrevs '(("tag" . "text/tag")))
+           (seen nil)
+           (triples-fts-term-expander
+            ;; Stands in for a tokenizer extension's query function.  The
+            ;; expander returns a SQL expression, with the term itself bound
+            ;; to the "?", so here it builds a prefix search, which makes
+            ;; "world" also match "worlds".
+            (lambda (term)
+              (push term seen)
+              (when (equal term "world") "(? || '*')"))))
+      (triples-fts-setup db)
+      (triples-add-schema db 'text '(text :base/type string :base/unique t)
+                          '(tag :base/type string))
+      (triples-set-subject db 'a '(text :text "Hello, worlds!" :tag ("foo")))
+      ;; The expander sees the bare term, so the prefix search matches "worlds".
+      (should (equal '(a) (triples-fts-query-subject db "world" abbrevs)))
+      (should (member "world" seen))
+      ;; Terms restricted to a predicate are never handed to the expander.
+      (should (equal '(a) (triples-fts-query-subject db "tag:foo" abbrevs)))
+      (should-not (seq-some (lambda (term) (string-prefix-p "predicate:" term))
+                            seen)))))
+
 (ert-deftest triples-fts-replace-updates-index ()
   "Replacing a triple's text should update the FTS index."
   (triples-test-with-temp-db
