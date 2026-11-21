@@ -45,18 +45,18 @@ This is useful when debugging a test."
   (sqlite-mode-open-file triples-test-db-file))
 
 (defmacro triples-deftest (name _ &rest body)
-  "Create a test exercising variants of `triples-sqlite-interface'.
+  "Create a test exercising variants of `triples-database-interface'.
 NAME is the name of the test, and BODY is the test code."
   (declare (debug t) (indent 2))
   (let ((builtin-name (intern (format "%s-builtin" name)))
         (emacsql-name (intern (format "%s-emacsql" name))))
     `(progn
        (ert-deftest ,builtin-name ()
-         (let ((triples-sqlite-interface 'builtin))
+         (let ((triples-database-interface 'builtin))
            (skip-unless (and (fboundp 'sqlite-available-p) (sqlite-available-p)))
            ,@body))
        (ert-deftest ,emacsql-name ()
-         (let ((triples-sqlite-interface 'emacsql))
+         (let ((triples-database-interface 'emacsql))
            (skip-unless (featurep 'emacsql))
            ,@body)))))
 
