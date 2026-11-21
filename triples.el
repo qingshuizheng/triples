@@ -443,11 +443,40 @@ normal schema checks, so should not be called from client programs."
      ;; that this cannot silently swallow a conflict on some other
      ;; constraint, and so that the statement keeps working if a column
      ;; is appended to the table.
-     (apply #'emacsql db
-            (concat "INSERT INTO triples (subject, predicate, object, properties)"
-                    " VALUES ($s1, $s2, $s3, $s4)"
-                    " ON CONFLICT (subject, predicate, object, properties) DO NOTHING")
-            (list subject (triples--decolon predicate) object (or properties '(:t t)))))))
+     (progn
+       (apply #'emacsql db
+              (concat "INSERT INTO triples (subject, predicate, object, properties)"
+                      " VALUES ($s1, $s2, $s3, $s4)"
+                      " ON CONFLICT (subject, predicate, object, properties) DO NOTHING")
+              (list subject (triples--decolon predicate) object (or properties '(:t t))))
+       ;; Keep the pinyin index in step, when one is configured.
+       (triples-pg-store-pinyin db subject object)))))
+
+(defun triples-pg-store-pinyin (db subject object)
+  "Record the pinyin of OBJECT under SUBJECT, for pg search.
+The pinyin is an index concern rather than a triple, so it goes in its own table,
+`triples_pinyin' (created on first use), instead of a column on `triples'.
+Does nothing unless `triples-fts-pinyin-function' is set, the interface is the
+`pg' one, and OBJECT is a string."
+  (when (and triples-fts-pinyin-function
+             (stringp object)
+             (eq triples-database-interface 'pg))
+    (emacsql db "CREATE TABLE IF NOT EXISTS triples_pinyin (subject text, pinyin text)")
+    ;; A note has several text rows (text, title, tags), so the pinyin of all of
+    ;; them is accumulated under the subject: appending keeps `shen du` findable
+    ;; as one string, which replacing per row would not.
+    (let* ((existing (or (caar (emacsql
+                                db (concat "SELECT pinyin FROM triples_pinyin WHERE subject = "
+                                           (triples--pg-literal subject))))
+                         ""))
+           (pinyin (concat existing
+                           (funcall triples-fts-pinyin-function object)
+                           " ")))
+      (emacsql db (concat "DELETE FROM triples_pinyin WHERE subject = "
+                          (triples--pg-literal subject)))
+      (emacsql db (concat "INSERT INTO triples_pinyin (subject, pinyin) VALUES ("
+                          (triples--pg-literal subject) ", "
+                          (triples--pg-literal pinyin) ")")))))
 
 (defun triples--emacsql-andify (wc)
   "In emacsql where clause WC, insert `:and' between query elements.

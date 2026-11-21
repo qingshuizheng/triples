@@ -120,11 +120,15 @@ expander, because rewriting them would destroy that syntax."
   "Return TEXT with the pinyin of every Chinese character appended.
 This is meant to be the value of `triples-fts-pinyin-function': the sqlite
 tokenizer builds the same expansion into the FTS index, and PostgreSQL has no
-tokenizer, so it has to be stored instead."
+tokenizer, so it has to be stored instead.
+
+The syllables are joined without separators, so that a query for `biede' finds
+`bie de' written across two characters: the stored form is searched with a
+substring match, and a space in it would break exactly that query."
   (let ((table (triples-fts--pinyin-table)))
     (mapconcat (lambda (ch)
                  (let ((py (gethash (char-to-string ch) table)))
-                   (if py (concat py " ") (string ch))))
+                   (if py py (string ch))))
                text "")))
 
 (defun triples-fts-setup (db &optional force)
@@ -253,7 +257,7 @@ rewrites TERM into something else."
   "Return TEXT ready to sit inside a single-quoted SQL string."
   (replace-regexp-in-string "'" "''" text))
 
-(defun triples-fts--pg-term-sql (term flag)
+(defun triples-fts--pg-term-sql (db term flag)
   "Return a statement selecting subjects matching TERM on PostgreSQL.
 FLAG mirrors `triples-fts--transform-query': a nil FLAG means TERM already has
 the `predicate:\"P\" object:\"O\"' syntax, otherwise it is a plain substring
@@ -265,9 +269,15 @@ search.  `triples-fts-term-expander' is not consulted: it produces FTS5 syntax."
               "%' AND predicate = '"
               (triples-fts--pg-sql-quote (match-string 1 term))
               "'")
-    (concat "SELECT subject FROM triples WHERE object ILIKE '%"
-            (triples-fts--pg-sql-quote (replace-regexp-in-string "[%_]" "" term))
-            "%'")))
+    (progn
+      ;; The pinyin table only exists once something has been stored there; a
+      ;; plain CREATE IF NOT EXISTS keeps the query self-contained.
+      (emacsql db "CREATE TABLE IF NOT EXISTS triples_pinyin (subject text, pinyin text)")
+      (let ((needle (triples-fts--pg-sql-quote
+                     (replace-regexp-in-string "[%_]" "" term))))
+        (concat "SELECT subject FROM triples WHERE object ILIKE '%" needle "%'"
+                " OR subject IN (SELECT subject FROM triples_pinyin"
+                " WHERE pinyin ILIKE '%" needle "%')")))))
 
 (defun triples-fts--pg-query-subject (db query &optional abbrevs)
   "LIKE-based fallback for `triples-fts-query-subject' on PostgreSQL.
@@ -283,11 +293,29 @@ tokenizer's pinyin expansion, but search works, and a `pg_trgm' index on
                     (emacsql db
                              (replace-regexp-in-string
                               "%" "%%"
-                              (triples-fts--pg-term-sql (car subquery) (cdr subquery))))))
+                              (triples-fts--pg-term-sql db (car subquery) (cdr subquery))))))
           (triples-fts--transform-query query abbrevs))))
     ;; No `triples-standardize-result' here: unlike `sqlite-select', emacsql has
     ;; already read the values back into Lisp objects.
     (seq-uniq (cl-reduce #'seq-intersection per-term))))
+
+(defun triples-fts-pg-backfill-pinyin (&optional function)
+  "Refresh the pinyin index for every text row of the current pg database.
+FUNCTION defaults to `triples-fts-pinyin-function'.  Notes written before the
+pinyin table existed, or while it was disabled, get their entry from here.
+Returns the number of rows refreshed."
+  (unless (eq triples-database-interface 'pg)
+    (user-error "Only the pg interface keeps a pinyin table"))
+  (let ((function (or function triples-fts-pinyin-function)))
+    (unless function
+      (user-error "Set `triples-fts-pinyin-function' first"))
+    (let ((db (triples-connect))
+          (n 0))
+      (dolist (row (emacsql db "SELECT subject, object FROM triples WHERE predicate = 'text/text'"))
+        (when (stringp (nth 1 row))
+          (triples-pg-store-pinyin db (nth 0 row) (nth 1 row))
+          (setq n (1+ n))))
+      n)))
 
 (defun triples-fts-query-subject (db query &optional abbrevs)
   "Query DB with QUERY, returning only subjects.
