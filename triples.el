@@ -493,8 +493,9 @@ all to nil, everything will be deleted, so be careful!"
                                                     (when properties "PROPERTIES = ?")))
                                   " AND "))))
                (mapcar #'triples-standardize-val (seq-filter #'identity (list subject predicate object properties)))))
-    ((or 'emacsql 'pg)
-     (triples--emacsql-delete db subject predicate object properties))))
+    ('emacsql
+     (triples--emacsql-delete db subject predicate object properties))
+    ('pg (triples--pg-delete db subject predicate object properties))))
 
 (defun triples-db-delete-subject-predicate-prefix (db subject pred-prefix)
   "Delete triples matching SUBJECT and predicates with PRED-PREFIX.
@@ -654,6 +655,40 @@ PRED is a decoloned predicate symbol; see
      (emacsql db [:select * :from triples :where (= subject $s1) :and (like predicate $r2)]
               subject (format "%s/%%" pred-prefix)))))
 
+(defun triples--pg-literal (v)
+  "Return V as a SQL literal for the `pg' interface.
+Every column is TEXT there, and `emacsql-pg' inlines its arguments instead of
+passing them as parameters, so values are written inline here: a bare number
+would make PostgreSQL compare text with integer (SQLSTATE 42883), and a
+pre-quoted one would not equal what the write path stored."
+  (let ((text (cond ((numberp v) (number-to-string v))
+                    ((consp v) (triples-standardize-val v))
+                    (t (format "%s" v)))))
+    (concat "'" (replace-regexp-in-string "'" "''" text) "'")))
+
+(defun triples--pg-delete (db &optional subject predicate object properties)
+  "Delete triples matching SUBJECT, PREDICATE, OBJECT, PROPERTIES over `pg'."
+  (let ((clauses nil))
+    (cl-flet ((add (col val) (push (format "%s = %s" col (triples--pg-literal val)) clauses)))
+      (when subject (add "subject" subject))
+      (when predicate (add "predicate" (triples--decolon predicate)))
+      (when object (add "object" object))
+      (when properties (add "properties" properties)))
+    (emacsql db (concat "DELETE FROM triples"
+                        (when clauses (concat " WHERE " (string-join (nreverse clauses) " AND ")))))))
+
+(defun triples--pg-select (db &optional subject predicate object properties selector)
+  "Return rows matching SUBJECT, PREDICATE, OBJECT, PROPERTIES over `pg'."
+  (let ((clauses nil))
+    (cl-flet ((add (col val) (push (format "%s = %s" col (triples--pg-literal val)) clauses)))
+      (when subject (add "subject" subject))
+      (when predicate (add "predicate" (triples--decolon predicate)))
+      (when object (add "object" object))
+      (when properties (add "properties" properties)))
+    (emacsql db (concat "SELECT " (if selector (string-join (mapcar #'symbol-name selector) ", ") "*")
+                        " FROM triples"
+                        (when clauses (concat " WHERE " (string-join (nreverse clauses) " AND ")))))))
+
 (defun triples--emacsql-select (db &optional subject predicate object properties selector)
   "Return rows in DB matching SUBJECT, PREDICATE, OBJECT, PROPERTIES.
 Shared by the `emacsql' and `pg' interfaces.  SELECTOR is a list
@@ -701,8 +736,9 @@ object, properties to retrieve or nil for *."
                                                                           (when properties "PROPERTIES = ?")))
                                                         " AND "))))
                                      (mapcar #'triples-standardize-val (seq-filter #'identity (list subject predicate object properties))))))
-    ((or 'emacsql 'pg)
-     (triples--emacsql-select db subject predicate object properties selector))))
+    ('emacsql
+     (triples--emacsql-select db subject predicate object properties selector))
+    ('pg (triples--pg-select db subject predicate object properties selector))))
 
 (defun triples-db-count (db)
   "Return the number of triples in DB."
