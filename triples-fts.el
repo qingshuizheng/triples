@@ -88,6 +88,13 @@ expander, because rewriting them would destroy that syntax."
   :group 'triples-fts)
 
 (defun triples-fts-setup (db &optional force)
+  "Ensure DB has an FTS table, where the interface has one.
+PostgreSQL has no FTS5 table, so there is nothing to set up there; the query
+side is still sqlite-only for now.  FORCE rebuilds, as in the sqlite case."
+  (unless (eq triples-database-interface 'pg)
+    (triples-fts--sqlite-setup db force)))
+
+(defun triples-fts--sqlite-setup (db force)
   "Ensure DB has a FTS table.
 As long as the FTS table exists, this will not try to recreate
 it.  If FORCE is non-nil, then the FTS and all triggers will be
