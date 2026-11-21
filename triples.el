@@ -166,6 +166,14 @@ connection is made according to `triples-pg-connection-spec'."
          db))
       ('pg (triples-pg-connect)))))
 
+(defcustom triples-fts-pinyin-function nil
+  "Function turning a text into the pinyin form stored for search.
+The sqlite tokenizer builds pinyin into the FTS index; PostgreSQL has no
+tokenizer, so the same expansion is written into the `pinyin' column of the
+triples table.  Mirrors `triples-fts-term-expander', which does it on the query
+side."
+  :type '(choice (const nil) function))
+
 (defvar triples-pg-connection-spec
   (list :database "triples"
         :user (user-login-name)
@@ -244,6 +252,7 @@ is `pg'."
                          :port (or (plist-get spec :port) 5432))))
     (unless (triples-pg-exists-check db)
       (triples-setup-table-for-pg db))
+
     db))
 
 (defun triples-setup-table-for-pg (db)

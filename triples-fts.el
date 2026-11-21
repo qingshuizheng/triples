@@ -87,6 +87,46 @@ expander, because rewriting them would destroy that syntax."
   :type '(choice (const :tag "None" nil) function)
   :group 'triples-fts)
 
+;;; Pinyin data
+;;
+;; `triples-pinyin.txt' holds 20924 common characters, one "character<TAB>pinyin"
+;; pair per line, derived from mozillazg/pinyin-data via the dictionary that the
+;; wangfenjin/simple tokenizer ships.  The sqlite tokenizer expands pinyin inside
+;; SQLite; for the pg interface the same expansion has to be computed in Lisp.
+
+(defvar triples-fts--pinyin-table-cache nil
+  "Hash table mapping a character to its pinyin, loaded on first use.")
+
+(defun triples-fts--pinyin-data-file ()
+  "Return the path of the pinyin data file."
+  (expand-file-name "triples-pinyin.txt"
+                    (file-name-directory (locate-library "triples"))))
+
+(defun triples-fts--pinyin-table ()
+  "Return the character to pinyin table, loading it on first use."
+  (or triples-fts--pinyin-table-cache
+      (setq triples-fts--pinyin-table-cache
+            (let ((table (make-hash-table :test #'equal))
+                  (file (triples-fts--pinyin-data-file)))
+              (when (file-readable-p file)
+                (with-temp-buffer
+                  (insert-file-contents file)
+                  (goto-char (point-min))
+                  (while (re-search-forward "^\\(.\\)\t\\([a-z]+\\)$" nil t)
+                    (puthash (match-string 1) (match-string 2) table))))
+              table))))
+
+(defun triples-fts-pinyin (text)
+  "Return TEXT with the pinyin of every Chinese character appended.
+This is meant to be the value of `triples-fts-pinyin-function': the sqlite
+tokenizer builds the same expansion into the FTS index, and PostgreSQL has no
+tokenizer, so it has to be stored instead."
+  (let ((table (triples-fts--pinyin-table)))
+    (mapconcat (lambda (ch)
+                 (let ((py (gethash (char-to-string ch) table)))
+                   (if py (concat py " ") (string ch))))
+               text "")))
+
 (defun triples-fts-setup (db &optional force)
   "Ensure DB has an FTS table, where the interface has one.
 PostgreSQL has no FTS5 table, so there is nothing to set up there; the query
