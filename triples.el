@@ -507,9 +507,23 @@ DB is the database to delete from."
     ('builtin (sqlite-execute db "DELETE FROM triples WHERE subject = ? AND predicate LIKE ?"
                               (list (triples-standardize-val subject)
                                     (format "%s/%%" (triples--decolon pred-prefix)))))
-    ((or 'emacsql 'pg)
+    ('emacsql
      (emacsql db [:delete :from triples :where (= subject $s1) :and (like predicate $r2)]
-              subject (format "%s/%%" (triples--decolon pred-prefix))))))
+              subject (format "%s/%%" (triples--decolon pred-prefix))))
+    ('pg
+     ;; emacsql inlines arguments, and the columns are TEXT in PostgreSQL, so the
+     ;; values are written as text literals instead of being passed to emacsql.
+     ;; The literal itself then goes through `emacsql-format', which runs the
+     ;; statement through `format': any `%' in it has to be doubled or the
+     ;; statement dies with "Not enough arguments for format string".
+     (emacsql db (replace-regexp-in-string
+                  "%" "%%"
+                  (concat "DELETE FROM triples WHERE subject = "
+                          (triples--pg-literal subject)
+                          " AND predicate LIKE "
+                          (triples--pg-literal
+                           (concat (symbol-name (triples--decolon pred-prefix))
+                                   "/%"))))))))
 
 (defconst triples--pg-numeric-regexp "^[+-]?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$"
   "Regexp matching the stored form of a numeric object in a `pg' database.
