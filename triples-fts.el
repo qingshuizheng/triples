@@ -209,6 +209,46 @@ rewrites TERM into something else."
            (funcall triples-fts-term-expander term))
       "?"))
 
+(defun triples-fts--pg-sql-quote (text)
+  "Return TEXT ready to sit inside a single-quoted SQL string."
+  (replace-regexp-in-string "'" "''" text))
+
+(defun triples-fts--pg-term-sql (term flag)
+  "Return a statement selecting subjects matching TERM on PostgreSQL.
+FLAG mirrors `triples-fts--transform-query': a nil FLAG means TERM already has
+the `predicate:\"P\" object:\"O\"' syntax, otherwise it is a plain substring
+search.  `triples-fts-term-expander' is not consulted: it produces FTS5 syntax."
+  (if (and (not flag)
+           (string-match "predicate:\"\([^\"]*\)\" object:\"\(.*\)\"$" term))
+      (concat "SELECT subject FROM triples WHERE object ILIKE '%"
+              (triples-fts--pg-sql-quote (match-string 2 term))
+              "%' AND predicate = '"
+              (triples-fts--pg-sql-quote (match-string 1 term))
+              "'")
+    (concat "SELECT subject FROM triples WHERE object ILIKE '%"
+            (triples-fts--pg-sql-quote (replace-regexp-in-string "[%_]" "" term))
+            "%'")))
+
+(defun triples-fts--pg-query-subject (db query &optional abbrevs)
+  "LIKE-based fallback for `triples-fts-query-subject' on PostgreSQL.
+There is no FTS5 table there, and PostgreSQL's default parser does not split
+Chinese, so each transformed term becomes a substring scan over `object',
+intersected with the others.  Slower than FTS5 and it carries none of the
+tokenizer's pinyin expansion, but search works, and a `pg_trgm' index on
+`object' keeps it fast."
+  (let ((per-term
+         (mapcar
+          (lambda (subquery)
+            (mapcar #'car
+                    (emacsql db
+                             (replace-regexp-in-string
+                              "%" "%%"
+                              (triples-fts--pg-term-sql (car subquery) (cdr subquery))))))
+          (triples-fts--transform-query query abbrevs))))
+    ;; No `triples-standardize-result' here: unlike `sqlite-select', emacsql has
+    ;; already read the values back into Lisp objects.
+    (seq-uniq (cl-reduce #'seq-intersection per-term))))
+
 (defun triples-fts-query-subject (db query &optional abbrevs)
   "Query DB with QUERY, returning only subjects.
 
@@ -226,7 +266,9 @@ through `triples-fts-term-expander', if it is set.
 ABBREVS is an alist of abbreviations to predicate (both strings).  If
 this is populated then we also expand user abbreviations like `tag:xyz`
 => `predicate:\"tagged/tag\" object:\"xyz\"`."
-  (seq-uniq
+  (if (eq triples-database-interface 'pg)
+      (triples-fts--pg-query-subject db query abbrevs)
+    (seq-uniq
    (mapcar
     #'triples-standardize-result
     (cl-reduce #'seq-intersection
@@ -242,7 +284,7 @@ this is populated then we also expand user abbreviations like `tag:xyz`
                                        (triples-fts--term-sql (car subquery))
                                      "?"))
                            (list (car subquery)))))
-                (triples-fts--transform-query query abbrevs))))))
+                (triples-fts--transform-query query abbrevs)))))))
 
 (provide 'triples-fts)
 
