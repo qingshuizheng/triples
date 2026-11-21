@@ -271,8 +271,12 @@ which SQLite tolerates but PostgreSQL rejects."
                                        (properties :not-null)])])
   (emacsql db [:create-index subject_idx :on triples [subject]])
   (emacsql db [:create-index subject_predicate_idx :on triples [subject predicate]])
-  (emacsql db [:create-index predicate_object_idx :on triples [predicate object]])
-  (emacsql db [:create-unique-index subject_predicate_object_properties_idx :on triples [subject predicate object properties]]))
+  ;; A note's text can exceed the 8191 bytes a btree row allows, so `object' is
+  ;; indexed with a hash (for =) and its md5 is what the unique index uses.  The
+  ;; conflict target in `triples-db-insert' names the same expression.
+  (emacsql db "CREATE INDEX IF NOT EXISTS predicate_idx ON triples (predicate)")
+  (emacsql db "CREATE INDEX IF NOT EXISTS object_hash_idx ON triples USING hash (object)")
+  (emacsql db "CREATE UNIQUE INDEX IF NOT EXISTS triples_uniq_md5 ON triples (subject, predicate, md5(object), properties)"))
 
 (defun triples-setup-table-for-builtin (db)
   "Set up the triples table in DB.
@@ -447,36 +451,37 @@ normal schema checks, so should not be called from client programs."
        (apply #'emacsql db
               (concat "INSERT INTO triples (subject, predicate, object, properties)"
                       " VALUES ($s1, $s2, $s3, $s4)"
-                      " ON CONFLICT (subject, predicate, object, properties) DO NOTHING")
+                      ;; A note's text can be larger than a btree row allows
+                      ;; (8191 bytes), so the unique index is on md5(object) and
+                      ;; the conflict target has to name the same expression.
+                      " ON CONFLICT (subject, predicate, (md5(object)), properties) DO NOTHING")
               (list subject (triples--decolon predicate) object (or properties '(:t t))))
        ;; Keep the pinyin index in step, when one is configured.
        (triples-pg-store-pinyin db subject object)))))
 
 (defun triples-pg-store-pinyin (db subject object)
-  "Record the pinyin of OBJECT under SUBJECT, for pg search.
-The pinyin is an index concern rather than a triple, so it goes in its own table,
-`triples_pinyin' (created on first use), instead of a column on `triples'.
-Does nothing unless `triples-fts-pinyin-function' is set, the interface is the
-`pg' one, and OBJECT is a string."
+  "Append the pinyin of OBJECT to SUBJECT's entry, for pg search.
+The pinyin is an index concern rather than a triple, so it lives in its own
+table, `triples_pinyin' (subject is the key, created on first use).  A note has
+several text rows, so the expansion is appended rather than replaced.  Does
+nothing unless `triples-fts-pinyin-function' is set, the interface is `pg', and
+OBJECT is a string."
   (when (and triples-fts-pinyin-function
              (stringp object)
              (eq triples-database-interface 'pg))
-    (emacsql db "CREATE TABLE IF NOT EXISTS triples_pinyin (subject text, pinyin text)")
-    ;; A note has several text rows (text, title, tags), so the pinyin of all of
-    ;; them is accumulated under the subject: appending keeps `shen du` findable
-    ;; as one string, which replacing per row would not.
-    (let* ((existing (or (caar (emacsql
-                                db (concat "SELECT pinyin FROM triples_pinyin WHERE subject = "
-                                           (triples--pg-literal subject))))
-                         ""))
-           (pinyin (concat existing
-                           (funcall triples-fts-pinyin-function object)
-                           " ")))
-      (emacsql db (concat "DELETE FROM triples_pinyin WHERE subject = "
-                          (triples--pg-literal subject)))
+    (let ((pinyin (funcall triples-fts-pinyin-function object))
+          ;; emacsql runs the statement through `format', so a `%' in a note's
+          ;; text (a mode line format, say) has to be doubled.
+          (quote-sql (lambda (text)
+                       (replace-regexp-in-string
+                        "%" "%%" (triples--pg-literal text)))))
+      (emacsql db (concat "CREATE TABLE IF NOT EXISTS triples_pinyin"
+                          " (subject text PRIMARY KEY, pinyin text)"))
       (emacsql db (concat "INSERT INTO triples_pinyin (subject, pinyin) VALUES ("
-                          (triples--pg-literal subject) ", "
-                          (triples--pg-literal pinyin) ")")))))
+                          (funcall quote-sql subject) ", "
+                          (funcall quote-sql pinyin) ")"
+                          " ON CONFLICT (subject) DO UPDATE SET"
+                          " pinyin = triples_pinyin.pinyin || excluded.pinyin")))))
 
 (defun triples--emacsql-andify (wc)
   "In emacsql where clause WC, insert `:and' between query elements.

@@ -300,22 +300,25 @@ tokenizer's pinyin expansion, but search works, and a `pg_trgm' index on
     (seq-uniq (cl-reduce #'seq-intersection per-term))))
 
 (defun triples-fts-pg-backfill-pinyin (&optional function)
-  "Refresh the pinyin index for every text row of the current pg database.
+  "Fill the pinyin index for every text row of the current pg database.
 FUNCTION defaults to `triples-fts-pinyin-function'.  Notes written before the
 pinyin table existed, or while it was disabled, get their entry from here.
-Returns the number of rows refreshed."
+Returns the number of notes refreshed."
   (unless (eq triples-database-interface 'pg)
     (user-error "Only the pg interface keeps a pinyin table"))
-  (let ((function (or function triples-fts-pinyin-function)))
+  (let ((function (or function triples-fts-pinyin-function))
+        (db (triples-connect))
+        (subjects nil))
     (unless function
       (user-error "Set `triples-fts-pinyin-function' first"))
-    (let ((db (triples-connect))
-          (n 0))
-      (dolist (row (emacsql db "SELECT subject, object FROM triples WHERE predicate = 'text/text'"))
-        (when (stringp (nth 1 row))
-          (triples-pg-store-pinyin db (nth 0 row) (nth 1 row))
-          (setq n (1+ n))))
-      n)))
+    ;; Dropped rather than emptied: a table created before the subject key
+    ;; existed cannot take an ON CONFLICT clause.
+    (emacsql db "DROP TABLE IF EXISTS triples_pinyin")
+    (dolist (row (emacsql db "SELECT subject, object FROM triples WHERE predicate = 'text/text'"))
+      (when (stringp (nth 1 row))
+        (triples-pg-store-pinyin db (nth 0 row) (nth 1 row))
+        (push (nth 0 row) subjects)))
+    (length (delete-dups subjects))))
 
 (defun triples-fts-query-subject (db query &optional abbrevs)
   "Query DB with QUERY, returning only subjects.
