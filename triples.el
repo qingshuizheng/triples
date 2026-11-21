@@ -778,7 +778,7 @@ markers).  But if there are no commonalities, the OLD-SUBJECT is
 merged into NEW-SUBJECT."
   (triples-with-transaction
     db
-    (pcase triples-sqlite-interface
+    (pcase triples-database-interface
       ('builtin
        (sqlite-execute db "UPDATE triples SET subject = ? WHERE subject = ?"
                        (list (triples-standardize-val new-subject) (triples-standardize-val old-subject)))
@@ -788,7 +788,18 @@ merged into NEW-SUBJECT."
        (emacsql db [:update triples :set (= subject $s1) :where (= subject $s2)]
                 new-subject old-subject)
        (emacsql db [:update triples :set (= object $s1) :where (= object $s2)]
-                new-subject old-subject)))))
+                new-subject old-subject))
+      ('pg
+       ;; emacsql inlines its arguments, and the columns are TEXT in PostgreSQL, so
+       ;; the values are written as text literals (see `triples--pg-literal').
+       (emacsql db (concat "UPDATE triples SET subject = "
+                           (triples--pg-literal new-subject)
+                           " WHERE subject = "
+                           (triples--pg-literal old-subject)))
+       (emacsql db (concat "UPDATE triples SET object = "
+                           (triples--pg-literal new-subject)
+                           " WHERE object = "
+                           (triples--pg-literal old-subject)))))))
 
 ;; Code after this point should not call sqlite or emacsql directly. If any more
 ;; calls are needed, put them in a defun, make it work for sqlite and emacsql,
