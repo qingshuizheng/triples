@@ -665,9 +665,18 @@ PRED is a decoloned predicate symbol; see
                       (sqlite-select db "SELECT * FROM triples WHERE subject = ? AND predicate LIKE ?"
                                      (list (triples-standardize-val subject)
                                            (format "%s/%%" pred-prefix)))))
-    ((or 'emacsql 'pg)
+    ('emacsql
      (emacsql db [:select * :from triples :where (= subject $s1) :and (like predicate $r2)]
-              subject (format "%s/%%" pred-prefix)))))
+              subject (format "%s/%%" pred-prefix)))
+    ('pg
+     ;; Same shape as `triples-db-delete-subject-predicate-prefix': text literals,
+     ;; and the % of the LIKE pattern doubled for `emacsql-format'.
+     (emacsql db (replace-regexp-in-string
+                  "%" "%%"
+                  (concat "SELECT * FROM triples WHERE subject = "
+                          (triples--pg-literal subject)
+                          " AND predicate LIKE "
+                          (triples--pg-literal (format "%s/%%" pred-prefix))))))))
 
 (defun triples--pg-literal (v)
   "Return V as a SQL literal for the `pg' interface.
