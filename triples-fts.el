@@ -94,6 +94,9 @@ expander, because rewriting them would destroy that syntax."
 ;; wangfenjin/simple tokenizer ships.  The sqlite tokenizer expands pinyin inside
 ;; SQLite; for the pg interface the same expansion has to be computed in Lisp.
 
+(defvar triples-fts--pg-pinyin-table-known nil
+  "Cache of whether the pg pinyin table exists, keyed by connection.")
+
 (defvar triples-fts--pinyin-table-cache nil
   "Hash table mapping a character to its pinyin, loaded on first use.")
 
@@ -256,6 +259,19 @@ rewrites TERM into something else."
 (defun triples-fts--pg-sql-quote (text)
   "Return TEXT ready to sit inside a single-quoted SQL string."
   (replace-regexp-in-string "'" "''" text))
+
+(defun triples-fts--pg-pinyin-table-exists-p (db)
+  "Return non-nil when DB has the pinyin table.
+Cached per connection object, because the search path must not pay a catalog
+query for every term."
+  (with-current-buffer (get-buffer-create " *triples-pinyin-check*")
+    (let ((key (format "%S" db)))
+      (unless (assoc key triples-fts--pg-pinyin-table-known)
+        (push (cons key
+                    (and (emacsql db "SELECT to_regclass('triples_pinyin')")
+                         t))
+              triples-fts--pg-pinyin-table-known))
+      (cdr (assoc key triples-fts--pg-pinyin-table-known)))))
 
 (defun triples-fts--pg-term-sql (db term flag)
   "Return a statement selecting subjects matching TERM on PostgreSQL.
