@@ -279,21 +279,21 @@ FLAG mirrors `triples-fts--transform-query': a nil FLAG means TERM already has
 the `predicate:\"P\" object:\"O\"' syntax, otherwise it is a plain substring
 search.  `triples-fts-term-expander' is not consulted: it produces FTS5 syntax."
   (if (and (not flag)
-           (string-match "predicate:\"\([^\"]*\)\" object:\"\(.*\)\"$" term))
+           (string-match "predicate:\"\\([^\"]*\\)\" object:\"\\(.*\\)\"$" term))
       (concat "SELECT subject FROM triples WHERE object ILIKE '%"
               (triples-fts--pg-sql-quote (match-string 2 term))
               "%' AND predicate = '"
               (triples-fts--pg-sql-quote (match-string 1 term))
               "'")
-    (progn
-      ;; The pinyin table only exists once something has been stored there; a
-      ;; plain CREATE IF NOT EXISTS keeps the query self-contained.
-      (emacsql db "CREATE TABLE IF NOT EXISTS triples_pinyin (subject text, pinyin text)")
-      (let ((needle (triples-fts--pg-sql-quote
-                     (replace-regexp-in-string "[%_]" "" term))))
-        (concat "SELECT subject FROM triples WHERE object ILIKE '%" needle "%'"
-                " OR subject IN (SELECT subject FROM triples_pinyin"
-                " WHERE pinyin ILIKE '%" needle "%')")))))
+    (let ((needle (triples-fts--pg-sql-quote
+                   (replace-regexp-in-string "[%_]" "" term))))
+      ;; No DDL in the read path: creating a table takes a lock that a
+      ;; concurrent writer can stall on.  The table is created by the store and
+      ;; the backfill; until then only the raw text is searched.
+      (concat "SELECT subject FROM triples WHERE object ILIKE '%" needle "%'"
+              (when (triples-fts--pg-pinyin-table-exists-p db)
+                (concat " OR subject IN (SELECT subject FROM triples_pinyin"
+                        " WHERE pinyin ILIKE '%" needle "%')"))))))
 
 (defun triples-fts--pg-query-subject (db query &optional abbrevs)
   "LIKE-based fallback for `triples-fts-query-subject' on PostgreSQL.
