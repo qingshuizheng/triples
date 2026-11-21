@@ -683,16 +683,30 @@ PRED is a decoloned predicate symbol; see
 Every column is TEXT there, and `emacsql-pg' inlines its arguments instead of
 passing them as parameters, so values are written inline here: a bare number
 would make PostgreSQL compare text with integer (SQLSTATE 42883), and a
-pre-quoted one would not equal what the write path stored."
+pre-quoted one would not equal what the write path stored.
+
+`prin1-to-string' is not used, even though it matches what `emacsql-format'
+writes for a string: callers pass values that are already in the stored form,
+and re-printing them would add a second layer of quotes."
   (let ((text (cond ((numberp v) (number-to-string v))
                     ((consp v) (triples-standardize-val v))
                     (t (format "%s" v)))))
     (concat "'" (replace-regexp-in-string "'" "''" text) "'")))
 
+(defun triples--pg-value-literal (v)
+  "Return V as a SQL literal holding the form it is stored in, for `pg'.
+`emacsql-format' prints values with `prin1' semantics on the way in, so a string
+is stored together with its quotes; a query has to do the same or it can never
+find what was written.  Numbers and symbols print the same either way.  This is
+for values that come straight from a caller; already formatted patterns (LIKE
+prefixes) must go through `triples--pg-literal' instead, or they get a second
+layer of quotes."
+  (triples--pg-literal (prin1-to-string v)))
+
 (defun triples--pg-delete (db &optional subject predicate object properties)
   "Delete triples matching SUBJECT, PREDICATE, OBJECT, PROPERTIES over `pg'."
   (let ((clauses nil))
-    (cl-flet ((add (col val) (push (format "%s = %s" col (triples--pg-literal val)) clauses)))
+    (cl-flet ((add (col val) (push (format "%s = %s" col (triples--pg-value-literal val)) clauses)))
       (when subject (add "subject" subject))
       (when predicate (add "predicate" (triples--decolon predicate)))
       (when object (add "object" object))
@@ -703,7 +717,7 @@ pre-quoted one would not equal what the write path stored."
 (defun triples--pg-select (db &optional subject predicate object properties selector)
   "Return rows matching SUBJECT, PREDICATE, OBJECT, PROPERTIES over `pg'."
   (let ((clauses nil))
-    (cl-flet ((add (col val) (push (format "%s = %s" col (triples--pg-literal val)) clauses)))
+    (cl-flet ((add (col val) (push (format "%s = %s" col (triples--pg-value-literal val)) clauses)))
       (when subject (add "subject" subject))
       (when predicate (add "predicate" (triples--decolon predicate)))
       (when object (add "object" object))
