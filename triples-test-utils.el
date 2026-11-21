@@ -38,6 +38,29 @@ This is defined so we can easily debug into it.")
              (triples-close db)))
        (delete-file db-file))))
 
+
+(defvar triples-test-pg-database "ekg_test"
+  "PostgreSQL database for the -pg test variants.
+The name must end in `_test': the macro below drops the triples table.")
+
+(defmacro triples-test-with-pg-db (&rest body)
+  "Run BODY against `triples-test-pg-database' over PostgreSQL."
+  (declare (indent 0) (debug t))
+  `(let ((triples-database-interface 'pg)
+         (triples-pg-connection-spec
+          (list :database triples-test-pg-database :user "ekg"
+                :host "localhost" :port 5432)))
+     (unless (string-suffix-p "_test" triples-test-pg-database)
+       (error "Refusing to drop tables in %s: the name must end in _test"
+              triples-test-pg-database))
+     (let ((db (triples-connect)))
+       (emacsql db "DROP TABLE IF EXISTS triples CASCADE")
+       (triples-close db))
+     (let ((db (triples-connect)))
+       (unwind-protect
+           (progn ,@body)
+         (triples-close db)))))
+
 (defun triples-test-open-db ()
   "Open the database file used in the current test.
 This is useful when debugging a test."
@@ -58,7 +81,14 @@ NAME is the name of the test, and BODY is the test code."
        (ert-deftest ,emacsql-name ()
          (let ((triples-database-interface 'emacsql))
            (skip-unless (featurep 'emacsql))
-           ,@body)))))
+           ,@body))
+       (ert-deftest ,(intern (format "%s-pg" name)) ()
+         (unless (getenv "TRIPLES_TEST_PG")
+           (ert-skip "set TRIPLES_TEST_PG=1 to run the PostgreSQL variants"))
+         (unless (and (require 'emacsql nil t) (require 'emacsql-pg nil t)
+                      (require 'pg nil t))
+           (ert-skip "emacsql-pg/pg are not available"))
+         (triples-test-with-pg-db ,@body)))))
 
 (provide 'triples-test-utils)
 
