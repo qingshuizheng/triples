@@ -159,10 +159,10 @@
     (should (equal (triples-test-list-sort (triples-db-select-pred-prefix db 'sub1 'pred))
                    (triples-test-list-sort `((sub1 pred/foo obj ,(pcase triples-database-interface
                                                                    ('builtin nil)
-                                                                   ('emacsql '(:t t))))
+                                                                   ((or 'emacsql 'pg) '(:t t))))
                                              (sub1 pred/bar obj ,(pcase triples-database-interface
                                                                    ('builtin nil)
-                                                                   ('emacsql '(:t t))))))))))
+                                                                   ((or 'emacsql 'pg) '(:t t))))))))))
 
 (triples-deftest triples-test-subjects-with-predicate-object ()
   (triples-test-with-temp-db
