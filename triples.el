@@ -27,8 +27,8 @@
 ;; provide an API offering two-way links between all information stored.
 ;;
 ;; This package requires either Emacs 29 or the emacsql package to be installed.
-;; The PostgreSQL backend additionally requires the `pg' (pg.el) package.
-;; The `emacsql-pg' backend is part of the `emacsql' package.
+;; The PostgreSQL backend additionally requires the `psql' command line
+;; program; it does not use the `pg' (pg.el) package.
 
 (require 'cl-lib)
 (require 'package)
@@ -44,7 +44,8 @@
 (declare-function emacsql-sqlite "emacsql")
 (declare-function emacsql "emacsql")
 (declare-function emacsql-sqlite-open "emacsql")
-(declare-function emacsql-pg "emacsql-pg" (dbname user &rest _))
+(declare-function triples-psql-connect "triples-psql" (&optional spec))
+(declare-function triples-psql-available-p "triples-psql")
 
 ;; The alias has to be declared before the variable it aliases,
 ;; otherwise the byte compiler warns that it is late.
@@ -61,8 +62,8 @@ Either `builtin', `emacsql', or `pg'.
 
 `builtin' uses the sqlite support built into Emacs 29.1 or later.
 `emacsql' uses the emacsql package with a SQLite backend.
-`pg' uses the emacsql package with a PostgreSQL backend (via
-`emacsql-pg'), connecting to the database specified by
+`pg' uses the emacsql package with a PostgreSQL backend, through the
+`psql' command line program, connecting to the database specified by
 `triples-pg-connection-spec'.
 
 Defaults to builtin when available.  Builtin is available when the
@@ -127,11 +128,12 @@ connection is made according to `triples-pg-connection-spec'."
              (and (fboundp 'sqlite-available-p) (sqlite-available-p)))
             ('emacsql (require 'emacsql nil t))
             ('pg (and (require 'emacsql nil t)
-                      (require 'emacsql-pg nil t)
-                      ;; `emacsql-pg' only soft-requires `pg', so check it
-                      ;; here to fail early with a clear message.
-                      (require 'pg nil t))))
-    (error "triples: the `%s' interface is not usable; `emacsql' is required, the `pg' interface additionally requires `pg', and the `builtin' interface requires Emacs 29.1 or later"
+                      (require 'triples-psql nil t)
+                      ;; The backend runs every statement through this
+                      ;; program, so fail early rather than at the first
+                      ;; statement with a confusing exec error.
+                      (triples-psql-available-p))))
+    (error "triples: the `%s' interface is not usable; `emacsql' is required, the `pg' interface additionally requires the `psql' program, and the `builtin' interface requires Emacs 29.1 or later"
            triples-database-interface))
   (let ((file (or file triples-default-database-filename)))
     (pcase triples-database-interface
@@ -189,41 +191,13 @@ Keys:
                over a Unix domain socket.
 - :port     -- Server port (integer, default 5432).
 - :password -- Password (string or a function returning a string)
-               or nil, e.g. for peer/trust auth.  Note that pg.el
-               does not read ~/.pgpass, so a password must be given
-               here when the server asks for one.
+               or nil, e.g. for peer/trust auth.  It is passed to
+               `psql' in PGPASSWORD, so ~/.pgpass and the other
+               libpq environment variables keep working when it is
+               nil.
 
-TLS is negotiated by pg.el when the server requires it; the
-`emacsql-pg' backend used here does not expose pg.el's
-`tls-options', so no further TLS configuration is possible.")
-
-(defvar triples--pg-emacsql-clear-fixed nil
-  "Whether `triples--pg-fix-emacsql-clear' has already run.")
-
-(defun triples--pg-fix-emacsql-clear ()
-  "Make `emacsql-clear' do nothing for `emacsql-pg' connections.
-
-`emacsql' calls `emacsql-clear' before every statement, and the
-generic implementation erases the connection's process buffer.
-pg.el keeps its own integer read position into that buffer
-\(`pgcon--position'), so erasing the buffer without resetting the
-position makes every later read time out with `pg-timeout': the
-connection looks like it has hung, as soon as `emacsql-pg'
-connects.
-
-Clearing the buffer is not needed for the pg backend anyway,
-because `emacsql-pg' parses the result object returned by
-`pg-exec' rather than the process buffer.  This is a workaround
-for an incompatibility between `emacsql-pg' and recent pg.el
-\(verified with pg.el 20260812); it can be dropped once
-`emacsql-pg' stops calling the buffer-erasing `emacsql-clear'."
-  (unless triples--pg-emacsql-clear-fixed
-    (when (find-class 'emacsql-pg-connection nil)
-      (with-no-warnings
-        (cl-defmethod emacsql-clear ((_connection emacsql-pg-connection))
-          "Do nothing; see `triples--pg-fix-emacsql-clear'."
-          nil))
-      (setq triples--pg-emacsql-clear-fixed t))))
+The connection is made by the `psql' program, so TLS, ~/.pgpass and
+the usual PG* environment variables are the client's, not Emacs's.")
 
 (defun triples-pg-exists-check (db)
   "Return non-nil if DB has a `triples' table.
@@ -240,16 +214,9 @@ that variable.  Returns the connection object, which can be used
 with the rest of the triples API when `triples-database-interface'
 is `pg'."
   (require 'emacsql)
-  (require 'emacsql-pg)
-  ;; Must happen before the `emacsql-pg' call below, which already
-  ;; runs a statement of its own while connecting.
-  (triples--pg-fix-emacsql-clear)
+  (require 'triples-psql)
   (let* ((spec (or spec triples-pg-connection-spec))
-         (db (emacsql-pg (plist-get spec :database)
-                         (plist-get spec :user)
-                         :host (or (plist-get spec :host) "localhost")
-                         :password (plist-get spec :password)
-                         :port (or (plist-get spec :port) 5432))))
+         (db (triples-psql-connect spec)))
     (unless (triples-pg-exists-check db)
       (triples-setup-table-for-pg db))
 
@@ -474,11 +441,16 @@ OBJECT is a string."
           ;; text (a mode line format, say) has to be doubled.
           (quote-sql (lambda (text)
                        (replace-regexp-in-string
-                        "%" "%%" (triples--pg-literal text)))))
+                        "%" "%%" (triples--pg-literal text))))
+          ;; The subject key has to be *exactly* what the triples table has in
+          ;; its subject column, or the search join misses every note whose
+          ;; subject is a string (the write path prints strings with `prin1').
+          (subject-sql (replace-regexp-in-string
+                        "%" "%%" (triples--pg-value-literal subject))))
       (emacsql db (concat "CREATE TABLE IF NOT EXISTS triples_pinyin"
                           " (subject text PRIMARY KEY, pinyin text)"))
       (emacsql db (concat "INSERT INTO triples_pinyin (subject, pinyin) VALUES ("
-                          (funcall quote-sql subject) ", "
+                          subject-sql ", "
                           (funcall quote-sql pinyin) ")"
                           " ON CONFLICT (subject) DO UPDATE SET"
                           " pinyin = triples_pinyin.pinyin || excluded.pinyin")))))
@@ -562,7 +534,9 @@ DB is the database to delete from."
      (emacsql db (replace-regexp-in-string
                   "%" "%%"
                   (concat "DELETE FROM triples WHERE subject = "
-                          (triples--pg-literal subject)
+                          ;; The subject comes from the caller, so it has
+                          ;; to be printed the way the write path stored it.
+                          (triples--pg-value-literal subject)
                           " AND predicate LIKE "
                           (triples--pg-literal
                            (concat (symbol-name (triples--decolon pred-prefix))
@@ -712,18 +686,20 @@ PRED is a decoloned predicate symbol; see
      (emacsql db [:select * :from triples :where (= subject $s1) :and (like predicate $r2)]
               subject (format "%s/%%" pred-prefix)))
     ('pg
-     ;; Same shape as `triples-db-delete-subject-predicate-prefix': text literals,
-     ;; and the % of the LIKE pattern doubled for `emacsql-format'.
+     ;; Same shape as `triples-db-delete-subject-predicate-prefix': the
+     ;; subject is a caller value, so it is printed the way it was stored,
+     ;; while the LIKE pattern is already in that form.  The % of the
+     ;; pattern is doubled for `emacsql-format'.
      (emacsql db (replace-regexp-in-string
                   "%" "%%"
                   (concat "SELECT * FROM triples WHERE subject = "
-                          (triples--pg-literal subject)
+                          (triples--pg-value-literal subject)
                           " AND predicate LIKE "
                           (triples--pg-literal (format "%s/%%" pred-prefix))))))))
 
 (defun triples--pg-literal (v)
   "Return V as a SQL literal for the `pg' interface.
-Every column is TEXT there, and `emacsql-pg' inlines its arguments instead of
+Every column is TEXT there, and `emacsql' inlines its arguments instead of
 passing them as parameters, so values are written inline here: a bare number
 would make PostgreSQL compare text with integer (SQLSTATE 42883), and a
 pre-quoted one would not equal what the write path stored.
@@ -847,16 +823,17 @@ merged into NEW-SUBJECT."
        (emacsql db [:update triples :set (= object $s1) :where (= object $s2)]
                 new-subject old-subject))
       ('pg
-       ;; emacsql inlines its arguments, and the columns are TEXT in PostgreSQL, so
-       ;; the values are written as text literals (see `triples--pg-literal').
+       ;; emacsql inlines its arguments, and the columns are TEXT in PostgreSQL,
+       ;; so the values are written as text literals in the form the write path
+       ;; stored them (see `triples--pg-value-literal').
        (emacsql db (concat "UPDATE triples SET subject = "
-                           (triples--pg-literal new-subject)
+                           (triples--pg-value-literal new-subject)
                            " WHERE subject = "
-                           (triples--pg-literal old-subject)))
+                           (triples--pg-value-literal old-subject)))
        (emacsql db (concat "UPDATE triples SET object = "
-                           (triples--pg-literal new-subject)
+                           (triples--pg-value-literal new-subject)
                            " WHERE object = "
-                           (triples--pg-literal old-subject)))))))
+                           (triples--pg-value-literal old-subject)))))))
 
 ;; Code after this point should not call sqlite or emacsql directly. If any more
 ;; calls are needed, put them in a defun, make it work for sqlite and emacsql,

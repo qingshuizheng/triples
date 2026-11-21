@@ -85,9 +85,9 @@ NAME is the name of the test, and BODY is the test code."
        (ert-deftest ,(intern (format "%s-pg" name)) ()
          (unless (getenv "TRIPLES_TEST_PG")
            (ert-skip "set TRIPLES_TEST_PG=1 to run the PostgreSQL variants"))
-         (unless (and (require 'emacsql nil t) (require 'emacsql-pg nil t)
-                      (require 'pg nil t))
-           (ert-skip "emacsql-pg/pg are not available"))
+         (unless (and (require 'emacsql nil t) (require 'triples-psql nil t)
+                      (triples-psql-available-p))
+           (ert-skip "emacsql and the psql program are not available"))
          (triples-test-with-pg-db ,@body)))))
 
 (provide 'triples-test-utils)

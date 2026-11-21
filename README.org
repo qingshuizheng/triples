@@ -51,7 +51,7 @@ An example of using this standard database is simply:
 #+end_src
 You could also use a global variable to hold the database connection, if you need the database to be active during many user actions.
 ** Choosing an interface
-Which storage is used is controlled by =triples-database-interface=, which is one of =builtin= (the sqlite built into Emacs 29.1 and later, the default when available), =emacsql= (the =emacsql= package with its sqlite backend), or =pg= (the =emacsql= package with its PostgreSQL backend, which additionally requires the [[https://github.com/emarsden/pg-el][pg]] package).
+Which storage is used is controlled by =triples-database-interface=, which is one of =builtin= (the sqlite built into Emacs 29.1 and later, the default when available), =emacsql= (the =emacsql= package with its sqlite backend), or =pg= (the =emacsql= package with its PostgreSQL backend, which additionally requires the =psql= program; it does not use the [[https://github.com/emarsden/pg-el][pg]] package).
 
 For PostgreSQL, set the connection information and connect:
 #+begin_src emacs-lisp
@@ -61,7 +61,7 @@ For PostgreSQL, set the connection information and connect:
             :user (user-login-name)
             :host "localhost"   ; or a directory, for a Unix socket
             :port 5432
-            :password nil))     ; pg.el does not read ~/.pgpass
+            :password nil))     ; psql uses PGPASSWORD / ~/.pgpass
 (let ((db (triples-connect)))
   (do-something-with db))
 #+end_src

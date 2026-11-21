@@ -25,7 +25,9 @@
 ;; unless `triples-pg-test-connection-spec' is non-nil, which
 ;; happens when the `TRIPLES_TEST_PG_DATABASE' environment variable
 ;; is set.  See that variable's documentation for the other
-;; environment variables that configure the connection.
+;; environment variables that configure the connection.  They also
+;; need the `psql' program, which is what the interface actually
+;; talks to.
 ;;
 ;; The integration tests empty the `triples' table before and after
 ;; every test, so point them at a scratch database, never at one
@@ -66,8 +68,8 @@ The integration tests are skipped unless
   `(progn
      (skip-unless triples-pg-test-connection-spec)
      (skip-unless (and (require 'emacsql nil t)
-                       (require 'emacsql-pg nil t)
-                       (require 'pg nil t)))
+                       (require 'triples-psql nil t)
+                       (triples-psql-available-p)))
      (let* ((triples-database-interface 'pg)
             (triples-pg-connection-spec triples-pg-test-connection-spec)
             (db (triples-connect)))
@@ -161,13 +163,16 @@ needs neither a PostgreSQL server nor a working pg.el install."
 (ert-deftest triples-pg-test-schema-sql ()
   (let ((sql (triples-pg-test-captured-sql
                (triples-setup-table-for-pg db))))
-    (should (equal (length sql) 5))
+    (should (equal (length sql) 6))
     (should (string-match-p "CREATE TABLE triples (\\(subject\\|predicate\\|object\\|properties\\)" (car sql)))
     (should (string-match-p "TEXT NOT NULL" (car sql)))
     ;; PostgreSQL rejects the extra bare `text' token that the emacsql
     ;; (sqlite) schema uses.
     (should-not (string-match-p "TEXT text" (car sql)))
-    (should (string-match-p "CREATE UNIQUE INDEX subject_predicate_object_properties_idx" (nth 4 sql)))))
+    ;; A note's text can exceed what a btree row holds, so the uniqueness
+    ;; is on md5(object), not on object itself.
+    (should (string-match-p "CREATE UNIQUE INDEX IF NOT EXISTS triples_uniq_md5 ON triples (subject, predicate, md5(object), properties)"
+                            (nth 5 sql)))))
 
 (ert-deftest triples-pg-test-insert-uses-explicit-conflict-target ()
   (let ((sql (triples-pg-test-captured-sql
@@ -175,7 +180,7 @@ needs neither a PostgreSQL server nor a working pg.el install."
     (should (= 1 (length sql)))
     (should (string-match-p
              (concat "INSERT INTO triples (subject, predicate, object, properties) VALUES ("
-                     ".+ ON CONFLICT (subject, predicate, object, properties) DO NOTHING")
+                     ".+ ON CONFLICT (subject, predicate, (md5(object)), properties) DO NOTHING")
              (car sql)))
     ;; Values are escaped exactly the way the `emacsql' interface escapes
     ;; them, so both backends store the same thing.
@@ -259,6 +264,38 @@ needs neither a PostgreSQL server nor a working pg.el install."
        (error "boom")))
     (should (= 2 (triples-db-count db)))))
 
+(ert-deftest triples-pg-test-nested-statement-during-query ()
+  "A statement issued from a timer must not share the waiting session.
+Timers run inside `accept-process-output', which is exactly where a statement
+on the same psql session would interleave its reply with the one being
+awaited.  The backend runs such a statement on a connection of its own, so
+both the timer and the waiting statement get their own answer."
+  (triples-pg-test-with-db
+    (triples-db-insert db "sub1" 'pred "obj")
+    (let ((nested-count nil))
+      (run-at-time 0.05 nil
+                   (lambda () (setq nested-count (triples-db-count db))))
+      ;; pg_sleep keeps this statement waiting long enough for the timer.
+      (emacsql db "SELECT pg_sleep(0.3), 'awake'")
+      (should (equal nested-count 1))
+      ;; The session's reply stream is still in step.
+      (should (= 1 (triples-db-count db)))
+      (should (equal (mapcar #'caddr (triples-db-select db)) '("obj"))))))
+
+(ert-deftest triples-pg-test-pinyin-keys-string-subjects-like-triples ()
+  "Pinyin search must find notes whose subject is a string.
+The pinyin table is joined to the triples table on the subject text, so it has
+to print the subject exactly the way the insert path stored it."
+  (triples-pg-test-with-db
+    (require 'triples-fts nil t)
+    (skip-unless (featurep 'triples-fts))
+    (emacsql db "DROP TABLE IF EXISTS triples_pinyin")
+    (let ((triples-fts-pinyin-function #'triples-fts-pinyin))
+      (triples-db-insert db "note-1" 'text/text "深度学习笔记")
+      (should (equal (triples-fts-query-subject db "shendu") '("note-1")))
+      (should (equal (triples-fts-query-subject db "深度") '("note-1"))))
+    (emacsql db "DROP TABLE IF EXISTS triples_pinyin")))
+
 (ert-deftest triples-pg-test-public-api ()
   "Exercise the high-level API, not just the low-level database calls."
   (triples-pg-test-with-db
@@ -283,11 +320,12 @@ needs neither a PostgreSQL server nor a working pg.el install."
     (triples-delete-subject db "bob")
     (should (null (triples-get-subject db "bob")))))
 
-(ert-deftest triples-pg-test-refuses-fts ()
+(ert-deftest triples-pg-test-fts-setup-is-a-no-op ()
+  "PostgreSQL has no FTS5 table, so setup has nothing to do there."
   (triples-pg-test-with-db
     (require 'triples-fts nil t)
     (skip-unless (featurep 'triples-fts))
-    (should-error (triples-fts-setup db) :type 'error)))
+    (should-not (triples-fts-setup db))))
 
 (ert-deftest triples-pg-test-backup ()
   (skip-unless (executable-find "pg_dump"))
